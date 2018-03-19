@@ -3,6 +3,9 @@ import cv2
 import numpy as np
 import matplotlib.pyplot as plt
 import keras
+import sklearn
+
+from sklearn.model_selection import train_test_split
 
 from keras.models import Sequential
 from keras.layers import Flatten, Dense, Lambda, Dropout
@@ -19,48 +22,67 @@ keras.backend.image_dim_ordering()
 
 # Training Data
 
-lines = []
+samples = []
 with open('data/driving_log.csv') as csvfile:
     reader = csv.reader(csvfile)
     for line in reader:
-        lines.append(line)
+        samples.append(line)
+
+train_samples, validation_samples = train_test_split(samples, test_size=0.2)
+
+# Training Data Generator
+
+def generator(samples, batch_size=32, directory="data"):
+    """
+    Based on generator from Udacity class: Generators
+    
+    samples: full set of training data
+    batch_size: size of training batch
+    directory: directory location training data is saved
+    
+    """
+    
+    num_samples = len(samples)
+    
+    while 1: # Loop forever so the generator never terminates
+        sklearn.utils.shuffle(samples)
         
-images = []
-measurements = []
+        for offset in range(0, num_samples, batch_size):
+            batch_samples = samples[offset:offset+batch_size]
 
-for line in lines[1:]:
-    
-    source_path = line[0]
-    filename = source_path.split("/")[-1]
-    current_path = 'data/IMG/' + filename
-    
-    image = cv2.imread(current_path)
-    images.append(image)
+            images = []
+            measurements = []
+            
+            for batch_sample in batch_samples:
+                
+                filename = directory+'/IMG/' + batch_sample[0].split('/')[-1]
+                
+                image = cv2.imread(filename)
+                images.append(image)
+                
+                measurement = float(batch_sample[3])
+                measurements.append(measurement)
+                
+                # Image Augmentation (Flip)
+                images.append(cv2.flip(image, 1))
+                measurements.append(measurement * -1.0)
+                 
 
-    measurement = float(line[3])
-    measurements.append(measurement)
+            X_train = np.array(images)
+            y_train = np.array(measurements)
+            
+            yield (X_train, y_train)
 
-print(len(images), len(measurements))
 
-# Image Augmentation 
+            
+# Generate Base Training and Validation Data
 
-augmented_images, augmented_measurements = [], []
-for image, measurement in zip(images, measurements):
-    augmented_images.append(image)
-    augmented_measurements.append(measurement)
-    
-    # Flip each image and measurement
-    augmented_images.append(cv2.flip(image, 1))
-    augmented_measurements.append(measurement * -1.0)
-    
-# Training Data Setup
-
-X_train = np.array(augmented_images)
-y_train = np.array(augmented_measurements)
-
+train_generator = generator(train_samples, batch_size=32, directory="data")
+validation_generator = generator(validation_samples, batch_size=32, directory="data")
 
 
 # Model (NVIDIA) Architecture
+
 model = Sequential()
 
 # Normalisation Layer
@@ -71,7 +93,9 @@ model.add(Cropping2D(cropping=((70, 25), (0,0))))
 
 # Convolution Layers
 model.add(Convolution2D(24,5,5, subsample=(2,2), activation="relu"))
+model.add(Dropout(0.5))
 model.add(Convolution2D(36,5,5, subsample=(2,2), activation="relu"))
+model.add(Dropout(0.5))
 model.add(Convolution2D(48,5,5, subsample=(2,2), activation="relu"))
 model.add(Convolution2D(64,3,3, activation="relu"))
 model.add(Convolution2D(64,3,3, activation="relu"))
@@ -85,11 +109,14 @@ model.add(Dense(10))
 # Output Layer
 model.add(Dense(1))
 
+
 # Model Training
 
 model.compile(loss="mse", optimizer="adam")
-history = model.fit(X_train, y_train, validation_split=0.2, shuffle=True, nb_epoch=5)
 
+history = model.fit_generator(train_generator, samples_per_epoch=2*len(train_samples),
+                             validation_data=validation_generator, nb_val_samples=2*len(validation_samples), 
+                              nb_epoch=5)
 model.save("model.h5")
 
 
@@ -105,52 +132,47 @@ plt.show()
 
 
 
-# Extra Training Data
 
-images = []
-measurements = []
-lines = []
+# Retraining the Model
+
+samples = []
 
 with open('extra_data/driving_log.csv') as csvfile:
     reader = csv.reader(csvfile)
     for line in reader:
-        lines.append(line)
+        samples.append(line)
                 
-for line in lines[1:]:
-    source_path = line[0]
-    filename = source_path.split("/")[-1]
-    current_path = 'extra_data/IMG/' + filename
-    
-    image = cv2.imread(current_path)
-    images.append(image)
-    
-    measurement = float(line[3])
-    measurements.append(measurement)
-
-# Image Augmentation 
-
-augmented_images, augmented_measurements = [], []
-for image, measurement in zip(images, measurements):
-    augmented_images.append(image)
-    augmented_measurements.append(measurement)
-    
-    # Flip each image and measurement
-    augmented_images.append(cv2.flip(image, 1))
-    augmented_measurements.append(measurement * -1.0)
-
-    
-# Training Data Setup
-
-X_train = np.array(augmented_images)
-y_train = np.array(augmented_measurements)
+train_samples, validation_samples = train_test_split(samples, test_size=0.2)
 
 
-# Model Re-Training
+
+# Generate Extra Training and Validation Data
+
+train_generator = generator(train_samples, batch_size=32, directory="extra_data")
+validation_generator = generator(validation_samples, batch_size=32, directory="extra_data")
+
+
+# Remove existing model, and load previous model
 
 del model
 model = load_model("model.h5")
 
-model.compile(loss="mse", optimizer="adam")
-history = model.fit(X_train, y_train, validation_split=0.2, shuffle=True, nb_epoch=2)
 
+# Model Re-Training
+
+model.compile(loss="mse", optimizer="adam")
+history = model.fit_generator(train_generator, samples_per_epoch=2*len(train_samples),
+                             validation_data=validation_generator, nb_val_samples=2*len(validation_samples), 
+                              nb_epoch=2)
 model.save("new_model.h5")
+
+
+# Plot the training and validation loss for each epoch
+
+plt.plot(history.history["loss"])
+plt.plot(history.history["val_loss"])
+plt.title("model mean squared error loss")
+plt.ylabel("mean squared error loss")
+plt.xlabel("epoch")
+plt.legend(["training set", "validation set"], loc="upper right")
+plt.show()
